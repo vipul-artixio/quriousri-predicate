@@ -1,0 +1,10 @@
+fastapi==0.115.0
+pandas==2.2.2
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.30 
+pydantic==2.8.2              
+python-dotenv==1.0.1
+python-multipart==0.0.17
+python-jose==3.4.0
+requests==2.31.0
+tenacity==8.2.3
