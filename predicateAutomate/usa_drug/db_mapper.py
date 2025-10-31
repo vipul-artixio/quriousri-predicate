@@ -228,7 +228,7 @@ class FDADrugDBMapper:
                 application_type_value = match.group(1)
         
         record = {
-            'country_of_origin': 6,
+            'country_of_origin': 1,
             'product_name': product.get('brand_name', ''),
             'ingredient_name': ingredient_names,  
             'registration_number': application_number,
