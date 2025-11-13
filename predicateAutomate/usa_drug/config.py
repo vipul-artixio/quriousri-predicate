@@ -6,8 +6,9 @@ load_dotenv()
 class Config:
     """Configuration class for USA FDA Drug fetcher"""
     FDA_BULK_DOWNLOAD_URL = "https://download.open.fda.gov/drug/drugsfda/drug-drugsfda-0001-of-0001.json.zip"
+    FDA_LABEL_BASE_URL = 'https://download.open.fda.gov/drug/label/'
     FDA_API_BASE_URL = "https://api.fda.gov/drug/drugsfda.json"
-    BATCH_SIZE = 1000 
+    BATCH_SIZE = 1000
     MAX_RETRIES = 3
     RETRY_DELAY = 2  
     REQUEST_TIMEOUT = 300 

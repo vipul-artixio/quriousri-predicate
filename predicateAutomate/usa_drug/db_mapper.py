@@ -3,14 +3,14 @@ import psycopg2.extras
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class FDADrugDBMapper:
-    """Maps FDA drug data to drug.drug_predicate_assessments table"""
+    """Maps FDA drug data to source.usa_drug_data table"""
     
     def __init__(self):
         self.conn = None
@@ -64,13 +64,13 @@ class FDADrugDBMapper:
     
     def format_submission_date(self, date_str: Optional[str]) -> Optional[str]:
         """
-        Format FDA date (YYYYMMDD) to DD-MM-YYYY format for submission_date field
+        Format FDA date (YYYYMMDD) to YYYY-MM-DD format for submission_date field
         
         Args:
             date_str: Date string in YYYYMMDD format
             
         Returns:
-            Date string in DD-MM-YYYY format or None
+            Date string in YYYY-MM-DD format or None
         """
         if not date_str or len(date_str) != 8:
             return None
@@ -79,7 +79,7 @@ class FDADrugDBMapper:
             year = date_str[:4]
             month = date_str[4:6]
             day = date_str[6:8]
-            return f"{day}-{month}-{year}"
+            return f"{year}-{month}-{day}"
         except:
             return None
     
@@ -128,9 +128,16 @@ class FDADrugDBMapper:
         
         return ", ".join(names)
     
-    def check_duplicate(self, application_number: str, product_name: str, 
-                       submission_type: str, submission_number: str,
-                       strength: str = None, dosage_form: str = None) -> bool:
+    def check_duplicate(
+        self,
+        application_number: str,
+        product_name: str,
+        submission_type: str,
+        submission_number: str,
+        submission_date: Optional[str],
+        strength: str = None,
+        dosage_form: str = None,
+    ) -> bool:
         """
         Check if record already exists in database based on actual table columns
         
@@ -139,6 +146,7 @@ class FDADrugDBMapper:
             product_name: Product/brand name
             submission_type: Submission type
             submission_number: Submission number
+            submission_date: Submission date in YYYY-MM-DD
             strength: Strength (optional for more specific matching)
             dosage_form: Dosage form (optional for more specific matching)
             
@@ -148,17 +156,19 @@ class FDADrugDBMapper:
         try:
             query = """
                 SELECT COUNT(*) as count
-                FROM drug.drug_predicate_assessments
+                FROM source.usa_drug_data
                 WHERE registration_number = %s
                 AND product_name = %s
                 AND submission_type = %s
                 AND submission_number = %s
+                AND submission_date IS NOT DISTINCT FROM %s
             """
             params = [
                 application_number,
                 product_name,
                 submission_type,
-                submission_number
+                submission_number,
+                submission_date
             ]
             
             if strength:
@@ -200,9 +210,19 @@ class FDADrugDBMapper:
         if openfda.get('manufacturer_name'):
             manufacturers = openfda['manufacturer_name']
             manufacturer = manufacturers[0] if isinstance(manufacturers, list) and manufacturers else None
-        
+
+        spl_id = None
+        if openfda.get('spl_id'):
+            values = openfda['spl_id']
+            spl_id = values if isinstance(values, list) else [values]
+
+        spl_set_id = None
+        if openfda.get('spl_set_id'):
+            values = openfda['spl_set_id']
+            spl_set_id = values if isinstance(values, list) else [values]
+
         active_ingredients = product.get('active_ingredients', [])
-        
+
         strength = self.format_strength(active_ingredients)
         
         ingredient_names = self.format_ingredient_names(active_ingredients)
@@ -230,6 +250,8 @@ class FDADrugDBMapper:
         record = {
             'country_of_origin': 1,
             'product_name': product.get('brand_name', ''),
+            'spl_id': spl_id,
+            'spl_set_id': spl_set_id,
             'ingredient_name': ingredient_names,  
             'registration_number': application_number,
             'registration_holder': sponsor_name,
@@ -240,96 +262,123 @@ class FDADrugDBMapper:
             'strength': strength,
             'route_administration': product.get('route', ''),
             'marketing_status': product.get('marketing_status', ''),
-            'approval_date': approval_date,
             'application_type': application_type_value,
             'submission_type': submission.get('submission_type', ''),
             'submission_number': submission.get('submission_number', ''),
             'submission_date': submission_date_formatted,
-            'json_data': json.dumps(json_data)
+            'json_data': json.dumps(json_data),
+            'created_by': None
         }
         
         return record
     
-    def insert_record(self, record: Dict) -> bool:
+    def upsert_record(self, record: Dict) -> Optional[Tuple[int, bool]]:
+        """Insert a record into source.usa_drug_data if it does not already exist.
+
+        Returns (record_id, True) when inserted, (record_id, False) when an existing
+        row is detected, or None on failure.
         """
-        Insert a record into drug_predicate_assessments table
-        
-        Args:
-            record: Transformed record dict
-            
-        Returns:
-            True if successful, False otherwise
+
+        payload = record.copy()
+        payload['spl_id'] = payload.get('spl_id') or []
+        payload['spl_set_id'] = payload.get('spl_set_id') or []
+
+        insert_query = """
+            INSERT INTO source.usa_drug_data (
+                country_of_origin,
+                product_name,
+                ingredient_name,
+                registration_number,
+                registration_holder,
+                manufacturer,
+                generic_name,
+                reference_drug,
+                dosage_form,
+                strength,
+                route_administration,
+                marketing_status,
+                application_type,
+                submission_type,
+                submission_number,
+                submission_date,
+                json_data,
+                created_at,
+                updated_at,
+                spl_id,
+                spl_set_id,
+                created_by
+            ) VALUES (
+                %(country_of_origin)s,
+                %(product_name)s,
+                %(ingredient_name)s,
+                %(registration_number)s,
+                %(registration_holder)s,
+                %(manufacturer)s,
+                %(generic_name)s,
+                %(reference_drug)s,
+                %(dosage_form)s,
+                %(strength)s,
+                %(route_administration)s,
+                %(marketing_status)s,
+                %(application_type)s,
+                %(submission_type)s,
+                %(submission_number)s,
+                %(submission_date)s,
+                %(json_data)s::jsonb,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP,
+                %(spl_id)s,
+                %(spl_set_id)s,
+                %(created_by)s
+            )
+            RETURNING id
         """
+
+        select_existing_query = """
+            SELECT id
+            FROM source.usa_drug_data
+            WHERE registration_number = %(registration_number)s
+              AND product_name = %(product_name)s
+              AND submission_type = %(submission_type)s
+              AND submission_number = %(submission_number)s
+              AND submission_date IS NOT DISTINCT FROM %(submission_date)s
+              AND strength IS NOT DISTINCT FROM %(strength)s
+            ORDER BY id
+            LIMIT 1
+        """
+
         try:
-            query = """
-                INSERT INTO drug.drug_predicate_assessments (
-                    country_of_origin,
-                    product_name,
-                    ingredient_name,
-                    registration_number,
-                    registration_holder,
-                    manufacturer,
-                    generic_name,
-                    reference_drug,
-                    dosage_form,
-                    strength,
-                    route_administration,
-                    marketing_status,
-                    approval_date,
-                    application_type,
-                    submission_type,
-                    submission_number,
-                    submission_date,
-                    json_data,
-                    created_at,
-                    updated_at
-                ) VALUES (
-                    %(country_of_origin)s,
-                    %(product_name)s,
-                    %(ingredient_name)s,
-                    %(registration_number)s,
-                    %(registration_holder)s,
-                    %(manufacturer)s,
-                    %(generic_name)s,
-                    %(reference_drug)s,
-                    %(dosage_form)s,
-                    %(strength)s,
-                    %(route_administration)s,
-                    %(marketing_status)s,
-                    %(approval_date)s,
-                    %(application_type)s,
-                    %(submission_type)s,
-                    %(submission_number)s,
-                    %(submission_date)s,
-                    %(json_data)s::jsonb,
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP
-                )
-            """
-            
-            self.cursor.execute(query, record)
-            self.conn.commit()
-            return True
-            
-        except Exception as e:
-            error_msg = str(e)
-            if 'value too long' in error_msg:
-                logger.error(f"Error inserting record (value too long): {error_msg}")
-                logger.error(f"Application: {record.get('registration_number')}, Product: {record.get('product_name')}")
-                logger.error("All field lengths:")
-                for field, value in record.items():
-                    if field != 'json_data':
-                        val_str = str(value or '')
-                        if len(val_str) > 255:
-                            logger.error(f"  {field}: {len(val_str)} chars (EXCEEDS 255!) - '{val_str[:100]}...'")
-                        elif len(val_str) > 200:
-                            logger.error(f"  {field}: {len(val_str)} chars - '{val_str[:100]}...'")
-                        else:
-                            logger.error(f"  {field}: {len(val_str)} chars")
-            else:
-                logger.error(f"Error inserting record: {e}")
-            self.conn.rollback()
-            return False
+            is_duplicate = self.check_duplicate(
+                payload.get('registration_number'),
+                payload.get('product_name'),
+                payload.get('submission_type'),
+                payload.get('submission_number'),
+                payload.get('submission_date'),
+                payload.get('strength'),
+                payload.get('dosage_form'),
+            )
+
+            if is_duplicate:
+                self.cursor.execute(select_existing_query, payload)
+                existing_row = self.cursor.fetchone()
+                if existing_row and existing_row.get('id') is not None:
+                    return existing_row['id'], False
+                return None
+
+            self.cursor.execute(insert_query, payload)
+            inserted_row = self.cursor.fetchone()
+            if inserted_row and inserted_row.get('id') is not None:
+                return inserted_row['id'], True
+
+            return None
+        except Exception as exc:
+            logger.error(
+                "Failed to upsert usa_drug_data record for application %s and product %s: %s",
+                payload.get('registration_number'),
+                payload.get('product_name'),
+                exc,
+            )
+            raise
     
     def process_fda_records(self, fda_records: List[Dict]) -> Dict:
         """
@@ -376,29 +425,42 @@ class FDADrugDBMapper:
                     strength = self.format_strength(active_ingredients)
                     dosage_form = product.get('dosage_form', '')
                     
-                    if self.check_duplicate(application_number, product_name, 
-                                          submission_type, submission_number,
-                                          strength, dosage_form):
-                        stats['duplicates'] += 1
-                        logger.debug(
-                            f"Duplicate found: {application_number}-{product_name}-"
-                            f"{submission_type}-{submission_number}"
-                        )
-                        continue
                     try:
                         record = self.transform_record(fda_record, product, submission)
-                        if self.insert_record(record):
+                        upsert_result = self.upsert_record(record)
+
+                        if not upsert_result:
+                            stats['errors'] += 1
+                            logger.error(
+                                "Failed to upsert record for %s - %s",
+                                record.get('registration_number'),
+                                record.get('product_name'),
+                            )
+                            self.conn.rollback()
+                            continue
+
+                        data_id, is_new = upsert_result
+
+                        if is_new:
+                            self.conn.commit()
                             stats['inserted'] += 1
                             logger.debug(
-                                f"Inserted: {record['product_name']} - "
-                                f"{record['registration_number']}"
+                                "Inserted: %s - %s",
+                                record.get('product_name'),
+                                record.get('registration_number'),
                             )
                         else:
-                            stats['errors'] += 1
-                            
+                            stats['duplicates'] += 1
+                            logger.debug(
+                                "Duplicate skipped: %s - %s",
+                                record.get('product_name'),
+                                record.get('registration_number'),
+                            )
+
                     except Exception as e:
                         logger.error(f"Error processing record: {e}")
                         stats['errors'] += 1
+                        self.conn.rollback()
         
         return stats
     
@@ -406,7 +468,7 @@ class FDADrugDBMapper:
         """Get total count in drug_predicate_assessments table"""
         try:
             self.cursor.execute(
-                "SELECT COUNT(*) as count FROM drug.drug_predicate_assessments"
+                "SELECT COUNT(*) as count FROM source.usa_drug_data"
             )
             result = self.cursor.fetchone()
             return result['count']

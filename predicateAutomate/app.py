@@ -1,8 +1,9 @@
-import sys
-import logging
 import argparse
 import json
+import logging
+import sys
 from datetime import datetime
+import importlib
 from pathlib import Path
 
 logging.basicConfig(
@@ -18,11 +19,19 @@ MODULES = {
     'usa_drug': {
         'name': 'USA FDA Drug',
         'path': 'usa_drug',
+        'main_file': 'main',
         'description': 'Downloads and processes complete FDA drug data from bulk file (no 25k limit)'
+    },
+    'usa_drug_label': {
+        'name': 'USA FDA Drug Labels',
+        'path': 'usa_drug',
+        'main_file': 'label_main',
+        'description': 'Downloads and processes FDA drug label data'
     },
     'singapore_drug': {
         'name': 'Singapore HSA Drug',
         'path': 'singapore_drug',
+        'main_file': 'main',
         'description': 'Fetches drug data from Singapore HSA (Coming Soon)'
     }
 }
@@ -109,12 +118,13 @@ def run_module(module_key: str, config: dict = None) -> bool:
     logger.info(f"Description: {module_info['description']}")
     logger.info("=" * 80)
     
+    sys.path.insert(0, str(module_path))
     try:
-        sys.path.insert(0, str(module_path))
-        import main as module_main
+        main_file = module_info.get('main_file', 'main')
+        module_main = importlib.import_module(main_file)
+
         result = module_main.main()
-        sys.path.pop(0)
-        
+
         if result == 0:
             logger.info(f"✓ {module_info['name']} completed successfully")
             return True
@@ -125,6 +135,8 @@ def run_module(module_key: str, config: dict = None) -> bool:
     except Exception as e:
         logger.error(f"Error running {module_info['name']}: {e}", exc_info=True)
         return False
+    finally:
+        sys.path.pop(0)
 
 
 def run_all_modules(config: dict = None) -> bool:
